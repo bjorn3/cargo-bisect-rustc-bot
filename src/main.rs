@@ -48,9 +48,15 @@ async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<dyn std::err
 
     match (json.get("comment"), json.get("action").and_then(|action| action.as_str())) {
         (Some(comment), Some("created")) => {
-        if let Some(comment_body) = comment.as_object().and_then(|comment| comment.get("body")?.as_str()) {
+            let comment = if let Some(comment) = comment.as_object() {
+                comment
+            } else {
+                println!("comment not an object: {:#?}", json);
+                return Ok(Response::new("comment not an object".into()));
+            };
+            if let (Some(comment_id), Some(comment_body)) = (comment.get("id").and_then(|id| id.as_u64()), comment.get("body").and_then(|body| body.as_str())) {
                 println!("{:?} commented \"{}\"", sender, comment_body);
-                parse_comment(comment_body);
+                parse_comment(comment_id, comment_body);
             } else {
                 println!("no comment body: {:#?}", json);
             }
@@ -62,7 +68,7 @@ async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<dyn std::err
     Ok(Response::new("processed".into()))
 }
 
-fn parse_comment(comment: &str) {
+fn parse_comment(comment_id: u64, comment: &str) {
     let mut lines = comment.lines();
     while let Some(line) = lines.next() {
         let line = line.trim();
@@ -98,7 +104,7 @@ fn parse_comment(comment: &str) {
                 let repro = lines.take_while(|line| line.trim() != "```").collect::<Vec<_>>().join("\n");
                 // --start={} --end={}
                 println!("{:?}", &cmds);
-                push_job(1, &cmds, &repro)
+                push_job(comment_id, &cmds, &repro)
             }
             cmd => {
                 println!("unknown command {:?}", cmd);
@@ -124,11 +130,19 @@ macro_rules! cmd {
     };
 }
 
-fn push_job(job_id: usize, bisect_cmds: &[String], repro: &str) {
+fn push_job(job_id: u64, bisect_cmds: &[String], repro: &str) {
     // Escape commands and join with whitespace
     let bisect_cmds = bisect_cmds.iter().map(|cmd| format!("{:?}", cmd)).collect::<Vec<_>>().join(" ");
 
-    cmd!(git "branch" "-d" (format!("job{}", job_id)));
+    let _ = std::process::Command::new("git")
+            .current_dir("push-job")
+            .arg("branch")
+            .arg("-d")
+            .arg(format!("job{}", job_id))
+            .spawn()
+            .unwrap()
+            .wait()
+            .unwrap();
     cmd!(git "checkout" "--orphan" (format!("job{}", job_id)));
     std::fs::remove_dir_all("push-job/.github").unwrap();
     std::fs::create_dir_all("push-job/.github/workflows").unwrap();
