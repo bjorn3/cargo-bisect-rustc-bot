@@ -1,0 +1,3 @@
+[submodule "push-job"]
+	path = push-job
+	url = git@github.com:bjorn3/cargo-bisect-rustc-bot.git
