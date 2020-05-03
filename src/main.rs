@@ -2,11 +2,17 @@ use std::convert::Infallible;
 use hyper::{Body, Request, Response, Server};
 use hyper::service::{make_service_fn, service_fn};
 
+mod zulip;
+
 const BOT_NAME: &'static str = "bisect-bot ";
 const TOKEN: &'static str = env!("TOKEN", "gh personal access token not defined");
+const ZULIP_USER: &'static str = env!("ZULIP_USERNAME", "zulip username not defined");
+const ZULIP_TOKEN: &'static str = env!("ZULIP_TOKEN", "zulip api token not defined");
 
 #[tokio::main]
 async fn main() {
+    let _zulip = tokio::spawn(crate::zulip::zulip_task());
+
     let addr = (
         [0, 0, 0, 0],
         std::env::var("PORT")
@@ -69,18 +75,25 @@ async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<dyn std::err
             }
         }
         (None, None, Some(check_run), Some("completed")) => {
-            let issue_number = if let Some(head_sha) = check_run.get("head_sha").and_then(|sha| sha.as_str()) {
+            let (is_zulip, issue_number) = if let Some(head_sha) = check_run.get("head_sha").and_then(|sha| sha.as_str()) {
                 let res = gh_api(&format!("https://api.github.com/repos/bjorn3/cargo-bisect-rustc-bot-jobs/git/commits/{}", head_sha)).await?;
                 println!("{}", res);
                 let json: serde_json::Value = serde_json::from_str(&res)?;
                 let json = json.as_object().ok_or_else(|| "not json")?;
-                json["message"].as_str().unwrap().split("#").nth(1).unwrap().split(")").nth(0).unwrap().parse::<u64>().unwrap()
+                let msg = json["message"].as_str().unwrap();
+                (msg.contains("zulip"), msg.split("#").nth(1).unwrap().split(")").nth(0).unwrap().parse::<u64>().unwrap())
             } else {
                 return Ok(Response::new("missing head_sha".into()));
             };
             println!("issue number: {}", issue_number);
             if let Some(html_url) = check_run.get("html_url").and_then(|url| url.as_str()) {
-                gh_post_comment(issue_number, &format!("bisect result: {}", html_url)).await?;
+                let body = format!("bisect result: {}", html_url);
+                if is_zulip {
+                    println!("success zulip#{}", issue_number);
+                    crate::zulip::zulip_post_message(issue_number, &body).await?;
+                } else {
+                    gh_post_comment(issue_number, &body).await?;
+                }
             } else {
                 println!("no check run id: {:#?}", json);
             }
@@ -167,7 +180,11 @@ async fn parse_comment(repo: &str, issue_number: u64, comment_id: u64, comment: 
                 // --start={} --end={}
                 println!("{:?}", &cmds);
                 push_job(repo, issue_number, comment_id, &cmds, &repro);
-                gh_post_comment(issue_number, "started bisection").await?;
+                if repo == "zulip" {
+                    crate::zulip::zulip_post_message(issue_number, "started bisection").await?;
+                } else {
+                    gh_post_comment(issue_number, "started bisection").await?;
+                }
             }
             cmd => {
                 println!("unknown command {:?}", cmd);
@@ -243,7 +260,7 @@ jobs:
     - run: cargo install cargo-bisect-rustc || true
 
     - name: Bisect
-      run: cargo bisect-rustc {} | grep -v "for x86_64-unknown-linux-gnu" || true
+      run: cargo bisect-rustc {} --access=github | grep -v "for x86_64-unknown-linux-gnu" || true
         "#,
         bisect_cmds,
     )).unwrap();
