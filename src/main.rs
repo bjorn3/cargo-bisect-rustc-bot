@@ -2,6 +2,8 @@ use std::convert::Infallible;
 use hyper::{Body, Request, Response, Server};
 use hyper::service::{make_service_fn, service_fn};
 
+const BOT_NAME: &'static str = "bisect-bot ";
+
 #[tokio::main]
 async fn main() {
     let addr = (
@@ -48,6 +50,7 @@ async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<dyn std::err
         (Some(comment), Some("created")) => {
         if let Some(comment_body) = comment.as_object().and_then(|comment| comment.get("body")?.as_str()) {
                 println!("{:?} commented \"{}\"", sender, comment_body);
+                parse_comment(comment_body);
             } else {
                 println!("no comment body: {:#?}", json);
             }
@@ -57,6 +60,54 @@ async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<dyn std::err
         }
     }
     Ok(Response::new("processed".into()))
+}
+
+fn parse_comment(comment: &str) {
+    let mut lines = comment.lines();
+    while let Some(line) = lines.next() {
+        let line = line.trim();
+        if !line.starts_with(BOT_NAME) {
+            continue;
+        }
+        let line = line[BOT_NAME.len()..].trim();
+        let mut parts = line.split(" ").map(|part| part.trim());
+
+        match parts.next() {
+            Some("bisect") => {
+                let mut cmds = vec![];
+                for part in parts {
+                    if part.starts_with("start=") {
+                        cmds.push(format!("--start={}", &part["start=".len()..]));
+                    } else if part.starts_with("end=") {
+                        cmds.push(format!("--end={}", &part["end=".len()..]));
+                    } else {
+                        println!("unknown command part {:?}", part);
+                        return;
+                    }
+                }
+                loop {
+                    match lines.next() {
+                        Some(line) if line.trim() == "```rust" => break,
+                        Some(_) => {}
+                        None => {
+                            println!("didn't find repro code");
+                            return;
+                        }
+                    }
+                }
+                let repro = lines.take_while(|line| line.trim() != "```").collect::<Vec<_>>().join("\n");
+                // --start={} --end={}
+                println!("{:?}", &cmds);
+                push_job(1, &cmds, &repro)
+            }
+            cmd => {
+                println!("unknown command {:?}", cmd);
+                return;
+            }
+        }
+
+        return;
+    }
 }
 
 macro_rules! cmd {
@@ -73,14 +124,17 @@ macro_rules! cmd {
     };
 }
 
-fn push_job(job_id: usize, start: &str, end: &str) {
+fn push_job(job_id: usize, bisect_cmds: &[String], repro: &str) {
+    // Escape commands and join with whitespace
+    let bisect_cmds = bisect_cmds.iter().map(|cmd| format!("{:?}", cmd)).collect::<Vec<_>>().join(" ");
+
     cmd!(git "branch" "-d" (format!("job{}", job_id)));
     cmd!(git "checkout" "--orphan" (format!("job{}", job_id)));
     std::fs::remove_dir_all("push-job/.github").unwrap();
     std::fs::create_dir_all("push-job/.github/workflows").unwrap();
     std::fs::remove_dir_all("push-job/src").unwrap();
     std::fs::create_dir("push-job/src").unwrap();
-    std::fs::copy("./regression.rs", "push-job/src/lib.rs").unwrap();
+    std::fs::write("push-job/src/lib.rs", repro).unwrap();
     std::fs::write("push-job/.github/workflows/bisect.yaml", format!(
         r#"
 name: Bisect
@@ -109,9 +163,9 @@ jobs:
     - run: cargo install cargo-bisect-rustc || true
 
     - name: Bisect
-      run: cargo bisect-rustc --start={} --end={}
+      run: cargo bisect-rustc {}
         "#,
-        start, end
+        bisect_cmds
     )).unwrap();
     cmd!(git "add" ".");
     cmd!(git "commit" "-m" (format!("Bisect job {}", job_id)));
