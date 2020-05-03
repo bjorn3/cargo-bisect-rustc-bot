@@ -3,6 +3,7 @@ use hyper::{Body, Request, Response, Server};
 use hyper::service::{make_service_fn, service_fn};
 
 const BOT_NAME: &'static str = "bisect-bot ";
+const TOKEN: &'static str = env!("TOKEN", "gh personal access token not defined");
 
 #[tokio::main]
 async fn main() {
@@ -16,7 +17,7 @@ async fn main() {
         .into();
 
     let make_svc = make_service_fn(|_conn| async {
-        Ok::<_, Infallible>(service_fn(web_hook))
+        Ok::<_, Infallible>(service_fn(request_handler))
     });
 
     let server = Server::bind(&addr).serve(make_svc);
@@ -27,6 +28,13 @@ async fn main() {
     }
 }
 
+async fn request_handler(req: Request<Body>) -> Result<Response<Body>, Box<dyn std::error::Error + Send + Sync>> {
+    web_hook(req).await.map_err(|err| {
+        println!("error: {}", err);
+        err
+    })
+}
+
 async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<dyn std::error::Error + Send + Sync>> {
     let body: hyper::body::Bytes = hyper::body::to_bytes(req.into_body()).await?;
     let body = std::str::from_utf8(&*body)?;
@@ -34,7 +42,7 @@ async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<dyn std::err
     let json = json.as_object().ok_or_else(|| "not json")?;
 
     let repo = json.get("repository").and_then(|repo| repo.as_object()?.get("full_name")?.as_str());
-    if repo != Some("bjorn3/cargo-bisect-rustc-bot") {
+    if repo != Some("bjorn3/cargo-bisect-rustc-bot") && repo != Some("bjorn3/cargo-bisect-rustc-bot-jobs") {
         println!("wrong repo {:?}", json);
         return Ok(Response::new("wrong repo".into()));
     }
@@ -46,19 +54,35 @@ async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<dyn std::err
         return Ok(Response::new("no sender".into()));
     };
 
-    match (json.get("comment"), json.get("action").and_then(|action| action.as_str())) {
-        (Some(comment), Some("created")) => {
-            let comment = if let Some(comment) = comment.as_object() {
-                comment
-            } else {
-                println!("comment not an object: {:#?}", json);
-                return Ok(Response::new("comment not an object".into()));
-            };
-            if let (Some(comment_id), Some(comment_body)) = (comment.get("id").and_then(|id| id.as_u64()), comment.get("body").and_then(|body| body.as_str())) {
+    match (
+        json.get("comment").and_then(|action| action.as_object()),
+        json.get("issue").and_then(|issue| issue.as_object()),
+        json.get("check_run").and_then(|action| action.as_object()),
+        json.get("action").and_then(|action| action.as_str()),
+    ) {
+        (Some(comment), Some(issue), None, Some("created")) => {
+            if let (Some(issue_number), Some(comment_id), Some(comment_body)) = (issue.get("number").and_then(|id| id.as_u64()), comment.get("id").and_then(|id| id.as_u64()), comment.get("body").and_then(|body| body.as_str())) {
                 println!("{:?} commented \"{}\"", sender, comment_body);
-                parse_comment(comment_id, comment_body);
+                parse_comment(repo.unwrap(), issue_number, comment_id, comment_body).await?;
             } else {
                 println!("no comment body: {:#?}", json);
+            }
+        }
+        (None, None, Some(check_run), Some("completed")) => {
+            let issue_number = if let Some(head_sha) = check_run.get("head_sha").and_then(|sha| sha.as_str()) {
+                let res = gh_api(&format!("https://api.github.com/repos/bjorn3/cargo-bisect-rustc-bot-jobs/git/commits/{}", head_sha)).await?;
+                println!("{}", res);
+                let json: serde_json::Value = serde_json::from_str(&res)?;
+                let json = json.as_object().ok_or_else(|| "not json")?;
+                json["message"].as_str().unwrap().split("#").nth(1).unwrap().split(")").nth(0).unwrap().parse::<u64>().unwrap()
+            } else {
+                return Ok(Response::new("missing head_sha".into()));
+            };
+            println!("issue number: {}", issue_number);
+            if let Some(html_url) = check_run.get("html_url").and_then(|url| url.as_str()) {
+                gh_post_comment(issue_number, &format!("bisect result: {}", html_url)).await?;
+            } else {
+                println!("no check run id: {:#?}", json);
             }
         }
         _ => {
@@ -68,7 +92,45 @@ async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<dyn std::err
     Ok(Response::new("processed".into()))
 }
 
-fn parse_comment(comment_id: u64, comment: &str) {
+async fn gh_api(url: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    println!("GET {}", url);
+    let res = reqwest::Client::new()
+        .get(url)
+        .header(hyper::http::header::USER_AGENT, hyper::http::HeaderValue::from_str("https://github.com/bjorn3/cargo-bisect-rustc-bot").unwrap())
+        .header(hyper::http::header::ACCEPT, hyper::http::HeaderValue::from_str("application/vnd.github.antiope-preview+json").unwrap())
+        .basic_auth("bjorn3", Some(TOKEN))
+        .send()
+        .await?;
+    println!("{}", res.status());
+    Ok(res.text().await?)
+}
+
+async fn gh_api_post(url: &str, body: String) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    println!("POST {} <- {}", url, body);
+    let res = reqwest::Client::new()
+        .post(url)
+        .header(hyper::http::header::USER_AGENT, hyper::http::HeaderValue::from_str("https://github.com/bjorn3/cargo-bisect-rustc-bot").unwrap())
+        .header(hyper::http::header::ACCEPT, hyper::http::HeaderValue::from_str("application/vnd.github.v3.html+json").unwrap())
+        .header(hyper::http::header::CONTENT_TYPE, hyper::http::HeaderValue::from_str("text/json").unwrap())
+        .basic_auth("bjorn3", Some(TOKEN))
+        .body(body)
+        .send()
+        .await?;
+    println!("{}", res.status());
+    Ok(res.text().await?)
+}
+
+async fn gh_post_comment(issue_number: u64, body: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("on issue {} post comment {:?}", issue_number, body);
+    let res = gh_api_post(
+        &format!("https://api.github.com/repos/bjorn3/cargo-bisect-rustc-bot/issues/{}/comments", issue_number),
+        format!(r#"{{"body": {:?}}}"#, body),
+    ).await?;
+    println!("on issue {} post comment result {:?}", issue_number, res);
+    Ok(())
+}
+
+async fn parse_comment(repo: &str, issue_number: u64, comment_id: u64, comment: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut lines = comment.lines();
     while let Some(line) = lines.next() {
         let line = line.trim();
@@ -88,7 +150,7 @@ fn parse_comment(comment_id: u64, comment: &str) {
                         cmds.push(format!("--end={}", &part["end=".len()..]));
                     } else {
                         println!("unknown command part {:?}", part);
-                        return;
+                        return Ok(());
                     }
                 }
                 loop {
@@ -97,23 +159,26 @@ fn parse_comment(comment_id: u64, comment: &str) {
                         Some(_) => {}
                         None => {
                             println!("didn't find repro code");
-                            return;
+                            return Ok(());
                         }
                     }
                 }
                 let repro = lines.take_while(|line| line.trim() != "```").collect::<Vec<_>>().join("\n");
                 // --start={} --end={}
                 println!("{:?}", &cmds);
-                push_job(comment_id, &cmds, &repro)
+                push_job(repo, issue_number, comment_id, &cmds, &repro);
+                gh_post_comment(issue_number, "started bisection").await?;
             }
             cmd => {
                 println!("unknown command {:?}", cmd);
-                return;
+                return Ok(());
             }
         }
 
-        return;
+        return Ok(());
     }
+
+    return Ok(());
 }
 
 macro_rules! cmd {
@@ -130,7 +195,7 @@ macro_rules! cmd {
     };
 }
 
-fn push_job(job_id: u64, bisect_cmds: &[String], repro: &str) {
+fn push_job(repo: &str, issue_number: u64, job_id: u64, bisect_cmds: &[String], repro: &str) {
     // Escape commands and join with whitespace
     let bisect_cmds = bisect_cmds.iter().map(|cmd| format!("{:?}", cmd)).collect::<Vec<_>>().join(" ");
 
@@ -138,6 +203,7 @@ fn push_job(job_id: u64, bisect_cmds: &[String], repro: &str) {
             .current_dir("push-job")
             .arg("branch")
             .arg("-d")
+            .arg("--force")
             .arg(format!("job{}", job_id))
             .spawn()
             .unwrap()
@@ -177,11 +243,11 @@ jobs:
     - run: cargo install cargo-bisect-rustc || true
 
     - name: Bisect
-      run: cargo bisect-rustc {}
+      run: cargo bisect-rustc {} | grep -v "for x86_64-unknown-linux-gnu" || true
         "#,
-        bisect_cmds
+        bisect_cmds,
     )).unwrap();
     cmd!(git "add" ".");
-    cmd!(git "commit" "-m" (format!("Bisect job {}", job_id)));
+    cmd!(git "commit" "-m" (format!("Bisect job for comment id {} ({}#{})", job_id, repo, issue_number)));
     cmd!(git "push" "origin" (format!("job{}", job_id)) "--force");
 }
