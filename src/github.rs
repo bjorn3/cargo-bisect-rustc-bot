@@ -44,15 +44,15 @@ pub(crate) async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<d
             };
             println!("reply to: {:?}", reply_to);
             match &*event.action {
-                    "created" => {
-                        reply_to.comment(&format!(
-                            "bisect started: {}\n\nUse `{}cancel {}` to cancel the bisection.",
+                "created" => {
+                    reply_to.comment(&format!(
+                        "bisect started: {}\n\nUse `{}cancel {}` to cancel the bisection.",
                         event.check_run.html_url, crate::BOT_NAME, event.check_run.id,
-                        )).await?;
-                    }
-                    "completed" => {
+                    )).await?;
+                }
+                "completed" => {
                     reply_to.comment(&format!("bisect result: {}", event.check_run.html_url)).await?;
-                    }
+                }
                 _ => {
                     println!("unknown check_run action");
                 }
@@ -115,17 +115,24 @@ struct CheckRunEvent {
     check_run: CheckRun,
     repository: Repository,
 }
+
 async fn gh_api(url: &str) -> reqwest::Result<String> {
     println!("GET {}", url);
-    let res = reqwest::Client::new()
+    let res: reqwest::Response = reqwest::Client::new()
         .get(url)
         .header(hyper::http::header::USER_AGENT, hyper::http::HeaderValue::from_str(crate::USER_AGENT).unwrap())
         .header(hyper::http::header::ACCEPT, hyper::http::HeaderValue::from_str("application/vnd.github.antiope-preview+json").unwrap())
         .basic_auth(crate::GITHUB_USERNAME, Some(crate::GITHUB_TOKEN))
         .send()
         .await?;
-    println!("{}", res.status());
-    Ok(res.text().await?)
+    println!("GET {}: {}", url, res.status());
+    match res.error_for_status_ref() {
+        Ok(_) => res.text().await,
+        Err(err) => {
+            println!("{}", res.text().await?);
+            return Err(err)
+        }
+    }
 }
 
 pub(crate) async fn gh_api_post(url: &str, body: String) -> reqwest::Result<String> {
@@ -139,8 +146,14 @@ pub(crate) async fn gh_api_post(url: &str, body: String) -> reqwest::Result<Stri
         .body(body)
         .send()
         .await?;
-    println!("{}", res.status());
-    Ok(res.text().await?)
+    println!("POST {}: {}", url, res.status());
+    match res.error_for_status_ref() {
+        Ok(_) => res.text().await,
+        Err(err) => {
+            println!("{}", res.text().await?);
+            return Err(err)
+        }
+    }
 }
 
 pub(crate) async fn gh_post_comment(repo: &str, issue_number: u64, body: &str) -> reqwest::Result<()> {
@@ -149,6 +162,6 @@ pub(crate) async fn gh_post_comment(repo: &str, issue_number: u64, body: &str) -
         &format!("https://api.github.com/repos/{}/issues/{}/comments", repo, issue_number),
         format!(r#"{{"body": {:?}}}"#, body),
     ).await?;
-    println!("on issue {} post comment result {:?}", issue_number, res);
+    println!("on issue {} post comment success", issue_number);
     Ok(())
 }

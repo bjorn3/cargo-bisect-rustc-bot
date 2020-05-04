@@ -45,6 +45,7 @@ pub(crate) async fn zulip_task() {
                 ZulipEvent::RealUser { id } => last_event_id = id as i64,
                 ZulipEvent::Subscription { id } => last_event_id = id as i64,
                 ZulipEvent::UpdateMessage { id } => last_event_id = id as i64,
+                ZulipEvent::Reaction { id } => last_event_id = id as i64,
                 ZulipEvent::Other => {
                     println!("{:?}", events_json)
                 }
@@ -109,6 +110,10 @@ enum ZulipEvent {
     },
     #[serde(rename = "update_message")]
     UpdateMessage {
+        id: u64,
+    },
+    #[serde(rename = "reaction")]
+    Reaction {
         id: u64,
     },
     #[serde(other)]

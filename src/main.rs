@@ -313,18 +313,20 @@ async fn create_blob(content: &str) -> reqwest::Result<String> {
         "content": content,
         "encoding": "utf-8",
     })).unwrap()).await?;
-    println!("create blob: {}", res);
     let res: serde_json::Value = serde_json::from_str(&res).unwrap();
-    Ok(res["sha"].as_str().unwrap().to_string())
+    let sha = res["sha"].as_str().unwrap().to_string();
+    println!("created blob: {}", sha);
+    Ok(sha)
 }
 
 async fn create_tree(content: &[TreeEntry]) -> reqwest::Result<String> {
     let res = crate::github::gh_api_post(&format!("https://api.github.com/repos/{}/git/trees", JOB_REPO), serde_json::to_string(&serde_json::json!({
         "tree": content,
     })).unwrap()).await?;
-    println!("create tree: {}", res);
     let res: serde_json::Value = serde_json::from_str(&res).unwrap();
-    Ok(res["sha"].as_str().unwrap().to_string())
+    let sha = res["sha"].as_str().unwrap().to_string();
+    println!("created tree: {}", sha);
+    Ok(sha)
 }
 
 #[derive(serde::Serialize)]
@@ -366,9 +368,10 @@ async fn create_commit(message: &str, tree: &str, parents: &[&str]) -> reqwest::
         "tree": tree,
         "parents": parents,
     })).unwrap()).await?;
-    println!("create commit: {}", res);
     let res: serde_json::Value = serde_json::from_str(&res).unwrap();
-    Ok(res["sha"].as_str().unwrap().to_string())
+    let sha = res["sha"].as_str().unwrap().to_string();
+    println!("created commit: {}", sha);
+    Ok(sha)
 }
 
 async fn push_branch(branch: &str, commit: &str) -> reqwest::Result<()> {
@@ -376,6 +379,6 @@ async fn push_branch(branch: &str, commit: &str) -> reqwest::Result<()> {
         "ref": format!("refs/heads/{}", branch),
         "sha": commit,
     })).unwrap()).await?;
-    println!("push branch: {}", res);
+    println!("pushed branch: {}", res);
     Ok(())
 }
