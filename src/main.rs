@@ -6,6 +6,9 @@ mod github;
 mod zulip;
 
 const BOT_NAME: &'static str = "bisect-bot ";
+const USER_AGENT: &'static str = "https://github.com/bjorn3/cargo-bisect-rustc-bot";
+const REPO_WHITELIST: &'static [&'static str] = &["bjorn3/cargo-bisect-rustc-bot", JOB_REPO];
+const JOB_REPO: &'static str = "bjorn3/cargo-bisect-rustc-bot-jobs";
 const GITHUB_USERNAME: &'static str = env!("GITHUB_USERNAME", "github username not defined");
 const GITHUB_TOKEN: &'static str = env!("GITHUB_TOKEN", "github personal access token not defined");
 const ZULIP_USER: &'static str = env!("ZULIP_USERNAME", "zulip username not defined");
@@ -306,7 +309,7 @@ publish = false
 }
 
 async fn create_blob(content: &str) -> reqwest::Result<String> {
-    let res = crate::github::gh_api_post("https://api.github.com/repos/bjorn3/cargo-bisect-rustc-bot-jobs/git/blobs", serde_json::to_string(&serde_json::json!({
+    let res = crate::github::gh_api_post(&format!("https://api.github.com/repos/{}/git/blobs", JOB_REPO), serde_json::to_string(&serde_json::json!({
         "content": content,
         "encoding": "utf-8",
     })).unwrap()).await?;
@@ -316,7 +319,7 @@ async fn create_blob(content: &str) -> reqwest::Result<String> {
 }
 
 async fn create_tree(content: &[TreeEntry]) -> reqwest::Result<String> {
-    let res = crate::github::gh_api_post("https://api.github.com/repos/bjorn3/cargo-bisect-rustc-bot-jobs/git/trees", serde_json::to_string(&serde_json::json!({
+    let res = crate::github::gh_api_post(&format!("https://api.github.com/repos/{}/git/trees", JOB_REPO), serde_json::to_string(&serde_json::json!({
         "tree": content,
     })).unwrap()).await?;
     println!("create tree: {}", res);
@@ -358,7 +361,7 @@ enum TreeEntryType {
 }
 
 async fn create_commit(message: &str, tree: &str, parents: &[&str]) -> reqwest::Result<String> {
-    let res = crate::github::gh_api_post("https://api.github.com/repos/bjorn3/cargo-bisect-rustc-bot-jobs/git/commits", serde_json::to_string(&serde_json::json!({
+    let res = crate::github::gh_api_post(&format!("https://api.github.com/repos/{}/git/commits", JOB_REPO), serde_json::to_string(&serde_json::json!({
         "message": message,
         "tree": tree,
         "parents": parents,
@@ -369,7 +372,7 @@ async fn create_commit(message: &str, tree: &str, parents: &[&str]) -> reqwest::
 }
 
 async fn push_branch(branch: &str, commit: &str) -> reqwest::Result<()> {
-    let res = crate::github::gh_api_post("https://api.github.com/repos/bjorn3/cargo-bisect-rustc-bot-jobs/git/refs", serde_json::to_string(&serde_json::json!({
+    let res = crate::github::gh_api_post(&format!("https://api.github.com/repos/{}/git/refs", JOB_REPO), serde_json::to_string(&serde_json::json!({
         "ref": format!("refs/heads/{}", branch),
         "sha": commit,
     })).unwrap()).await?;

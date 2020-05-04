@@ -7,11 +7,14 @@ pub(crate) async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<d
     let json = json.as_object().ok_or_else(|| "not json")?;
 
     let repo = json.get("repository").and_then(|repo| repo.as_object()?.get("full_name")?.as_str());
-    if repo != Some("bjorn3/cargo-bisect-rustc-bot") && repo != Some("bjorn3/cargo-bisect-rustc-bot-jobs") {
+    if repo.is_none() {
+        println!("no repo: {:?}", json);
+    }
+    let repo = repo.unwrap();
+    if !crate::REPO_WHITELIST.iter().any(|&r| r == repo) {
         println!("wrong repo {:?}", json);
         return Ok(Response::new("wrong repo".into()));
     }
-    let repo = repo.unwrap();
 
     let sender = if let Some(sender) = json.get("sender").and_then(|sender| sender.as_object()?.get("login")?.as_str()) {
         sender
@@ -37,7 +40,7 @@ pub(crate) async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<d
         (None, None, Some(check_run), Some(action)) => {
             println!("action: {}", action);
             let reply_to = if let Some(head_sha) = check_run.get("head_sha").and_then(|sha| sha.as_str()) {
-                let res = gh_api(&format!("https://api.github.com/repos/bjorn3/cargo-bisect-rustc-bot-jobs/git/commits/{}", head_sha)).await?;
+                let res = gh_api(&format!("https://api.github.com/repos/{}/git/commits/{}", crate::JOB_REPO, head_sha)).await?;
                 println!("{}", res);
                 let json: serde_json::Value = serde_json::from_str(&res)?;
                 let json = json.as_object().ok_or_else(|| "not json")?;
@@ -76,7 +79,7 @@ async fn gh_api(url: &str) -> reqwest::Result<String> {
     println!("GET {}", url);
     let res = reqwest::Client::new()
         .get(url)
-        .header(hyper::http::header::USER_AGENT, hyper::http::HeaderValue::from_str("https://github.com/bjorn3/cargo-bisect-rustc-bot").unwrap())
+        .header(hyper::http::header::USER_AGENT, hyper::http::HeaderValue::from_str(crate::USER_AGENT).unwrap())
         .header(hyper::http::header::ACCEPT, hyper::http::HeaderValue::from_str("application/vnd.github.antiope-preview+json").unwrap())
         .basic_auth(crate::GITHUB_USERNAME, Some(crate::GITHUB_TOKEN))
         .send()
@@ -89,7 +92,7 @@ pub(crate) async fn gh_api_post(url: &str, body: String) -> reqwest::Result<Stri
     println!("POST {} <- {}", url, body);
     let res = reqwest::Client::new()
         .post(url)
-        .header(hyper::http::header::USER_AGENT, hyper::http::HeaderValue::from_str("https://github.com/bjorn3/cargo-bisect-rustc-bot").unwrap())
+        .header(hyper::http::header::USER_AGENT, hyper::http::HeaderValue::from_str(crate::USER_AGENT).unwrap())
         .header(hyper::http::header::ACCEPT, hyper::http::HeaderValue::from_str("application/vnd.github.v3.html+json").unwrap())
         .header(hyper::http::header::CONTENT_TYPE, hyper::http::HeaderValue::from_str("text/json").unwrap())
         .basic_auth(crate::GITHUB_USERNAME, Some(crate::GITHUB_TOKEN))
