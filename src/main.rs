@@ -52,6 +52,7 @@ async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<dyn std::err
         println!("wrong repo {:?}", json);
         return Ok(Response::new("wrong repo".into()));
     }
+    let repo = repo.unwrap();
 
     let sender = if let Some(sender) = json.get("sender").and_then(|sender| sender.as_object()?.get("login")?.as_str()) {
         sender
@@ -69,31 +70,26 @@ async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<dyn std::err
         (Some(comment), Some(issue), None, Some("created")) => {
             if let (Some(issue_number), Some(comment_id), Some(comment_body)) = (issue.get("number").and_then(|id| id.as_u64()), comment.get("id").and_then(|id| id.as_u64()), comment.get("body").and_then(|body| body.as_str())) {
                 println!("{:?} commented \"{}\"", sender, comment_body);
-                parse_comment(repo.unwrap(), issue_number, comment_id, comment_body).await?;
+                parse_comment(repo, issue_number, comment_id, comment_body).await?;
             } else {
                 println!("no comment body: {:#?}", json);
             }
         }
         (None, None, Some(check_run), Some("completed")) => {
-            let (is_zulip, issue_number) = if let Some(head_sha) = check_run.get("head_sha").and_then(|sha| sha.as_str()) {
+            let reply_to = if let Some(head_sha) = check_run.get("head_sha").and_then(|sha| sha.as_str()) {
                 let res = gh_api(&format!("https://api.github.com/repos/bjorn3/cargo-bisect-rustc-bot-jobs/git/commits/{}", head_sha)).await?;
                 println!("{}", res);
                 let json: serde_json::Value = serde_json::from_str(&res)?;
                 let json = json.as_object().ok_or_else(|| "not json")?;
                 let msg = json["message"].as_str().unwrap();
-                (msg.contains("zulip"), msg.split("#").nth(1).unwrap().split(")").nth(0).unwrap().parse::<u64>().unwrap())
+                ReplyTo::from_commit_message(msg).map_err(|()| format!("Failed to parse commit message {:?}", msg))?
             } else {
                 return Ok(Response::new("missing head_sha".into()));
             };
-            println!("issue number: {}", issue_number);
+            println!("reply to: {:?}", reply_to);
             if let Some(html_url) = check_run.get("html_url").and_then(|url| url.as_str()) {
                 let body = format!("bisect result: {}", html_url);
-                if is_zulip {
-                    println!("success zulip#{}", issue_number);
-                    crate::zulip::zulip_post_message(issue_number, &body).await?;
-                } else {
-                    gh_post_comment(issue_number, &body).await?;
-                }
+                reply_to.comment(&body).await?;
             } else {
                 println!("no check run id: {:#?}", json);
             }
@@ -143,59 +139,173 @@ async fn gh_post_comment(issue_number: u64, body: &str) -> Result<(), Box<dyn st
     Ok(())
 }
 
-async fn parse_comment(repo: &str, issue_number: u64, comment_id: u64, comment: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut lines = comment.lines();
-    while let Some(line) = lines.next() {
-        let line = line.trim();
-        if !line.starts_with(BOT_NAME) {
-            continue;
-        }
-        let line = line[BOT_NAME.len()..].trim();
-        let mut parts = line.split(" ").map(|part| part.trim());
+#[derive(Debug)]
+enum ReplyTo {
+    Github {
+        repo: String,
+        issue_number: u64,
+    },
+    ZulipPrivate {
+        user_id: u64,
+    },
+}
 
-        match parts.next() {
-            Some("bisect") => {
-                let mut cmds = vec![];
-                for part in parts {
-                    if part.starts_with("start=") {
-                        cmds.push(format!("--start={}", &part["start=".len()..]));
-                    } else if part.starts_with("end=") {
-                        cmds.push(format!("--end={}", &part["end=".len()..]));
-                    } else {
-                        println!("unknown command part {:?}", part);
-                        return Ok(());
-                    }
-                }
-                loop {
-                    match lines.next() {
-                        Some(line) if line.trim() == "```rust" => break,
-                        Some(_) => {}
-                        None => {
-                            println!("didn't find repro code");
-                            return Ok(());
-                        }
-                    }
-                }
-                let repro = lines.take_while(|line| line.trim() != "```").collect::<Vec<_>>().join("\n");
-                // --start={} --end={}
-                println!("{:?}", &cmds);
-                push_job(repo, issue_number, comment_id, &cmds, &repro);
-                if repo == "zulip" {
-                    crate::zulip::zulip_post_message(issue_number, "started bisection").await?;
-                } else {
-                    gh_post_comment(issue_number, "started bisection").await?;
-                }
+impl ReplyTo {
+    async fn comment(&self, body: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        match *self {
+            ReplyTo::Github { ref repo, issue_number } => {
+                gh_post_comment(issue_number, body).await
             }
-            cmd => {
-                println!("unknown command {:?}", cmd);
-                return Ok(());
+            ReplyTo::ZulipPrivate { user_id } => {
+                crate::zulip::zulip_post_message(user_id, body).await
             }
         }
-
-        return Ok(());
     }
 
-    return Ok(());
+    const COMMIT_HEADER: &'static str = "X-Bisectbot-Reply-To";
+
+    fn to_commit_header(&self) -> String {
+        match *self {
+            ReplyTo::Github { ref repo, issue_number } => {
+                format!("{}: github {}#{}", Self::COMMIT_HEADER, repo, issue_number)
+            }
+            ReplyTo::ZulipPrivate { user_id } => {
+                format!("{}: zulip-private {}", Self::COMMIT_HEADER, user_id)
+            }
+        }
+    }
+
+    fn from_commit_message(message: &str) -> Result<Self, ()> {
+        for line in message.lines() {
+            let line = line.trim();
+            if !line.starts_with(Self::COMMIT_HEADER) {
+                continue;
+            }
+            let header = line[Self::COMMIT_HEADER.len()+1..].trim();
+            let mut split = header.split(" ");
+            let kind = split.next().ok_or(())?.trim();
+            let to = split.next().ok_or(())?.trim();
+            if split.next().is_some() {
+                return Err(());
+            }
+            match kind {
+                "github" => {
+                    let mut split = to.split("#");
+                    let repo = split.next().ok_or(())?.trim();
+                    let issue_number = split.next().ok_or(())?.trim().parse().map_err(|_| ())?;
+                    if split.next().is_some() {
+                        return Err(());
+                    }
+                    return Ok(ReplyTo::Github {
+                        repo: repo.to_string(),
+                        issue_number,
+                    });
+                }
+                "zulip-private" => {
+                    let user_id = to.parse().map_err(|_| ())?;
+                    return Ok(ReplyTo::ZulipPrivate {
+                        user_id,
+                    });
+                }
+                _ => return Err(()),
+            }
+        }
+
+        Err(())
+    }
+}
+
+enum Command {
+    Bisect {
+        start: Option<String>,
+        end: String,
+        code: String,
+    },
+}
+
+impl Command {
+    fn parse_comment(comment: &str) -> Result<Option<Command>, String> {
+        let mut lines = comment.lines();
+        while let Some(line) = lines.next() {
+            let line = line.trim();
+            if !line.starts_with(BOT_NAME) {
+                continue;
+            }
+            let line = line[BOT_NAME.len()..].trim();
+            let mut parts = line.split(" ").map(|part| part.trim());
+
+            match parts.next() {
+                Some("bisect") => {
+                    let mut start = None;
+                    let mut end = None;
+                    for part in parts {
+                        if part.starts_with("start=") {
+                            if start.is_some() {
+                                return Err(format!("start range specified twice"));
+                            }
+                            start = Some(part["start=".len()..].to_string());
+                        } else if part.starts_with("end=") {
+                            if end.is_some() {
+                                return Err(format!("end range specified twice"));
+                            }
+                            end = Some(part["end=".len()..].to_string());
+                        } else {
+                            return Err(format!("unknown command part {:?}", part));
+                        }
+                    }
+                    let end = end.ok_or("missing end range")?;
+                    loop {
+                        match lines.next() {
+                            Some(line) if line.trim() == "```rust" => break,
+                            Some(_) => {}
+                            None => {
+                                return Err("didn't find repro code".to_string());
+                            }
+                        }
+                    }
+                    let code = lines.take_while(|line| line.trim() != "```").collect::<Vec<_>>().join("\n");
+                    return Ok(Some(Command::Bisect {
+                        start,
+                        end,
+                        code,
+                    }));
+
+                }
+                cmd => {
+                    return Err(format!("unknown command {:?}", cmd));
+                }
+            }
+        }
+
+        return Ok(None);
+    }
+}
+
+async fn parse_comment(repo: &str, issue_number: u64, comment_id: u64, comment: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match Command::parse_comment(comment)? {
+        Some(Command::Bisect {
+            start,
+            end,
+            code,
+        }) => {
+            let mut cmds = Vec::new();
+            if let Some(start) = start {
+                cmds.push(format!("--start={}", start));
+            }
+            cmds.push(format!("--end={}", end));
+            println!("{:?}", &cmds);
+            let reply_to = if repo == "zulip" {
+                ReplyTo::ZulipPrivate { user_id: issue_number }
+            } else {
+                ReplyTo::Github { repo: repo.to_string(), issue_number }
+            };
+            push_job(&reply_to, comment_id, &cmds, &code);
+            reply_to.comment("started bisection").await?;
+        }
+        None => {}
+    }
+
+    Ok(())
 }
 
 macro_rules! cmd {
@@ -212,7 +322,7 @@ macro_rules! cmd {
     };
 }
 
-fn push_job(repo: &str, issue_number: u64, job_id: u64, bisect_cmds: &[String], repro: &str) {
+fn push_job(reply_to: &ReplyTo, job_id: u64, bisect_cmds: &[String], repro: &str) {
     // Escape commands and join with whitespace
     let bisect_cmds = bisect_cmds.iter().map(|cmd| format!("{:?}", cmd)).collect::<Vec<_>>().join(" ");
 
@@ -265,6 +375,6 @@ jobs:
         bisect_cmds,
     )).unwrap();
     cmd!(git "add" ".");
-    cmd!(git "commit" "-m" (format!("Bisect job for comment id {} ({}#{})", job_id, repo, issue_number)));
+    cmd!(git "commit" "-m" (format!("Bisect job for comment id {}\n\n{}", job_id, reply_to.to_commit_header())));
     cmd!(git "push" "origin" (format!("job{}", job_id)) "--force");
 }
