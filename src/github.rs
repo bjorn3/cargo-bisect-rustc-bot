@@ -1,80 +1,120 @@
 use hyper::{Body, Request, Response};
 
 pub(crate) async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<dyn std::error::Error + Send + Sync>> {
+    let event = req.headers().get("X-GitHub-Event").ok_or("no X-Github-Event header")?.to_str()?.to_string();
     let body: hyper::body::Bytes = hyper::body::to_bytes(req.into_body()).await?;
     let body = std::str::from_utf8(&*body)?;
     let json: serde_json::Value = serde_json::from_str(body)?;
-    let json = json.as_object().ok_or_else(|| "not json")?;
 
-    let repo = json.get("repository").and_then(|repo| repo.as_object()?.get("full_name")?.as_str());
-    if repo.is_none() {
-        println!("no repo: {:?}", json);
-    }
-    let repo = repo.unwrap();
+    let repo = json
+        .as_object()
+        .ok_or("not json")?
+        .get("repository")
+        .and_then(|repo| repo.as_object()?.get("full_name")?.as_str())
+        .ok_or("missing repo")?;
     if !crate::REPO_WHITELIST.iter().any(|&r| r == repo) {
         println!("wrong repo {:?}", json);
         return Ok(Response::new("wrong repo".into()));
     }
 
-    let sender = if let Some(sender) = json.get("sender").and_then(|sender| sender.as_object()?.get("login")?.as_str()) {
-        sender
-    } else {
-        println!("no sender {:?}", json);
-        return Ok(Response::new("no sender".into()));
-    };
+    match &*event {
+        "issue_comment" => {
+            let event: IssueCommentEvent = serde_json::from_value(json)?;
 
-    match (
-        json.get("comment").and_then(|action| action.as_object()),
-        json.get("issue").and_then(|issue| issue.as_object()),
-        json.get("check_run").and_then(|action| action.as_object()),
-        json.get("action").and_then(|action| action.as_str()),
-    ) {
-        (Some(comment), Some(issue), None, Some("created")) => {
-            if let (Some(issue_number), Some(comment_id), Some(comment_body)) = (issue.get("number").and_then(|id| id.as_u64()), comment.get("id").and_then(|id| id.as_u64()), comment.get("body").and_then(|body| body.as_str())) {
-                println!("{:?} commented \"{}\"", sender, comment_body);
-                crate::parse_comment(&crate::ReplyTo::Github { repo: repo.to_string(), issue_number }, comment_id, comment_body).await?;
-            } else {
-                println!("no comment body: {:#?}", json);
+            if event.action != "created" {
+                return Ok(Response::new("processed".into()));
             }
+            println!("{:?} commented \"{}\"", event.sender.login, event.comment.body);
+            crate::parse_comment(
+                &crate::ReplyTo::Github { repo: event.repository.full_name.clone(), issue_number: event.issue.number },
+                event.comment.id,
+                &event.comment.body,
+            ).await?;
         }
-        (None, None, Some(check_run), Some(action)) => {
-            println!("action: {}", action);
-            let reply_to = if let Some(head_sha) = check_run.get("head_sha").and_then(|sha| sha.as_str()) {
-                let res = gh_api(&format!("https://api.github.com/repos/{}/git/commits/{}", crate::JOB_REPO, head_sha)).await?;
-                println!("{}", res);
-                let json: serde_json::Value = serde_json::from_str(&res)?;
-                let json = json.as_object().ok_or_else(|| "not json")?;
-                let msg = json["message"].as_str().unwrap();
-                crate::ReplyTo::from_commit_message(msg).map_err(|()| format!("Failed to parse commit message {:?}", msg))?
-            } else {
-                return Ok(Response::new("missing head_sha".into()));
+        "check_run" => {
+            let event: CheckRunEvent = serde_json::from_value(json)?;
+            println!("check_run action: {}", event.action);
+            let reply_to = {
+                let res = gh_api(&format!(
+                    "https://api.github.com/repos/{}/git/commits/{}",
+                    crate::JOB_REPO, event.check_run.head_sha,
+                )).await?;
+                let commit: Commit = serde_json::from_str(&res)?;
+                crate::ReplyTo::from_commit_message(&commit.message).map_err(|()| format!("Failed to parse commit message {:?}", commit.message))?
             };
             println!("reply to: {:?}", reply_to);
-            if let Some(html_url) = check_run.get("html_url").and_then(|url| url.as_str()) {
-                match action {
+            match &*event.action {
                     "created" => {
-                        let run_id = check_run["id"].as_u64().unwrap();
                         reply_to.comment(&format!(
                             "bisect started: {}\n\nUse `{}cancel {}` to cancel the bisection.",
-                            html_url, crate::BOT_NAME, run_id,
+                        event.check_run.html_url, crate::BOT_NAME, event.check_run.id,
                         )).await?;
                     }
                     "completed" => {
-                        reply_to.comment(&format!("bisect result: {}", html_url)).await?;
+                    reply_to.comment(&format!("bisect result: {}", event.check_run.html_url)).await?;
                     }
-                    _ => {}
+                _ => {
+                    println!("unknown check_run action");
                 }
-            } else {
-                println!("no check run id: {:#?}", json);
             }
         }
         _ => {
-            println!("{:#?}", json);
+            println!("unknown event {}: {}", event, body);
+            return Ok(Response::new("unknown event".into()));
         }
     }
+
     Ok(Response::new("processed".into()))
 }
 
+#[derive(serde::Deserialize)]
+struct Repository {
+    full_name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct Commit {
+    message: String,
+}
+
+#[derive(serde::Deserialize)]
+struct Issue {
+    number: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct Comment {
+    id: u64,
+    body: String,
+}
+
+#[derive(serde::Deserialize)]
+struct User {
+    login: String,
+}
+
+#[derive(serde::Deserialize)]
+struct IssueCommentEvent {
+    action: String,
+    repository: Repository,
+    issue: Issue,
+    comment: Comment,
+    sender: User,
+}
+
+#[derive(serde::Deserialize)]
+struct CheckRun {
+    id: u64,
+    head_sha: String,
+    html_url: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CheckRunEvent {
+    action: String,
+    check_run: CheckRun,
+    repository: Repository,
+}
 async fn gh_api(url: &str) -> reqwest::Result<String> {
     println!("GET {}", url);
     let res = reqwest::Client::new()
