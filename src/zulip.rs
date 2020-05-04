@@ -1,11 +1,17 @@
-async fn register_event_queue(client: &reqwest::Client) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+async fn register_event_queue(client: &reqwest::Client) -> reqwest::Result<String> {
     let res = client
-        .post("https://rust-lang.zulipchat.com/api/v1/register")
+        .post("https://rust-lang.zulipchat.com/api/v1/register?event_types=%5B%22message%22%5D&all_public_streams=true")
         .basic_auth(crate::ZULIP_USER, Some(crate::ZULIP_TOKEN))
-        .body("event_types=%5B%22message%22%5D")
-        .send().await?
-        .text().await?;
-    let res: serde_json::Value = serde_json::from_str(&res)?;
+        .body("event_types=%5B%22message%22%5D&all_public_streams=true")
+        .send().await?;
+    let res = match res.error_for_status_ref() {
+        Ok(_) => res.text().await?,
+        Err(err) => {
+            println!("{}", res.text().await?);
+            return Err(err)
+        }
+    };
+    let res: serde_json::Value = serde_json::from_str(&res).unwrap();
     let queue_id = res.as_object().unwrap()["queue_id"].as_str().unwrap().to_string();
     println!("zulip queue: {}", queue_id);
     Ok(queue_id)
