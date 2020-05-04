@@ -236,11 +236,19 @@ fn push_job(reply_to: &ReplyTo, job_id: u64, bisect_cmds: &[String], repro: &str
             .wait()
             .unwrap();
     cmd!(git "checkout" "--orphan" (format!("job{}", job_id)));
-    std::fs::remove_dir_all("push-job/.github").unwrap();
-    std::fs::create_dir_all("push-job/.github/workflows").unwrap();
+    std::fs::write("push-job/Cargo.toml", r#"[package]
+name = "cargo-bisect-bot-job"
+version = "0.0.0"
+edition = "2018"
+publish = false
+
+[dependencies]
+"#).unwrap();
     std::fs::remove_dir_all("push-job/src").unwrap();
     std::fs::create_dir("push-job/src").unwrap();
     std::fs::write("push-job/src/lib.rs", repro).unwrap();
+    std::fs::remove_dir_all("push-job/.github").unwrap();
+    std::fs::create_dir_all("push-job/.github/workflows").unwrap();
     std::fs::write("push-job/.github/workflows/bisect.yaml", format!(
         r#"
 name: Bisect
