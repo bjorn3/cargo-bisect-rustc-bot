@@ -70,7 +70,7 @@ async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<dyn std::err
         (Some(comment), Some(issue), None, Some("created")) => {
             if let (Some(issue_number), Some(comment_id), Some(comment_body)) = (issue.get("number").and_then(|id| id.as_u64()), comment.get("id").and_then(|id| id.as_u64()), comment.get("body").and_then(|body| body.as_str())) {
                 println!("{:?} commented \"{}\"", sender, comment_body);
-                parse_comment(&ReplyTo::Github { repo, issue_number }, comment_id, comment_body).await?;
+                parse_comment(&ReplyTo::Github { repo: repo.to_string(), issue_number }, comment_id, comment_body).await?;
             } else {
                 println!("no comment body: {:#?}", json);
             }
@@ -129,10 +129,10 @@ async fn gh_api_post(url: &str, body: String) -> Result<String, Box<dyn std::err
     Ok(res.text().await?)
 }
 
-async fn gh_post_comment(issue_number: u64, body: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn gh_post_comment(repo: &str, issue_number: u64, body: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("on issue {} post comment {:?}", issue_number, body);
     let res = gh_api_post(
-        &format!("https://api.github.com/repos/bjorn3/cargo-bisect-rustc-bot/issues/{}/comments", issue_number),
+        &format!("https://api.github.com/repos/{}/issues/{}/comments", repo, issue_number),
         format!(r#"{{"body": {:?}}}"#, body),
     ).await?;
     println!("on issue {} post comment result {:?}", issue_number, res);
@@ -154,7 +154,7 @@ impl ReplyTo {
     async fn comment(&self, body: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match *self {
             ReplyTo::Github { ref repo, issue_number } => {
-                gh_post_comment(issue_number, body).await
+                gh_post_comment(repo, issue_number, body).await
             }
             ReplyTo::ZulipPrivate { user_id } => {
                 crate::zulip::zulip_post_message(user_id, body).await
