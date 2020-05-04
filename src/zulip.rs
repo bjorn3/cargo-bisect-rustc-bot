@@ -1,34 +1,49 @@
-pub(crate) async fn zulip_task() {
-    let client = reqwest::Client::new();
-    let queue_register_res = client
+async fn register_event_queue(client: &reqwest::Client) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let res = client
         .post("https://rust-lang.zulipchat.com/api/v1/register")
         .basic_auth(crate::ZULIP_USER, Some(crate::ZULIP_TOKEN))
         .body("event_types=%5B%22message%22%5D")
-        .send().await.unwrap()
-        .text().await.unwrap();
-    let queue_id = (serde_json::from_str(&queue_register_res) as Result<serde_json::Value, _>).unwrap()
-        .as_object().unwrap()["queue_id"].as_str().unwrap().to_string();
-    //let queue_id = "1588463074:5047";
+        .send().await?
+        .text().await?;
+    let res: serde_json::Value = serde_json::from_str(&res)?;
+    let queue_id = res.as_object().unwrap()["queue_id"].as_str().unwrap().to_string();
     println!("zulip queue: {}", queue_id);
+    Ok(queue_id)
+}
+
+pub(crate) async fn zulip_task() {
+    let client = reqwest::Client::new();
+    let mut queue_id = register_event_queue(&client).await.unwrap();
     let mut last_event_id = -1;
     loop {
         let url = format!("https://rust-lang.zulipchat.com/api/v1/events?queue_id={}&last_event_id={}&dont_block=false", queue_id.replace(':', "%3A"), last_event_id);
         println!("GET {}", url);
-        let events = client.get(&url)
+        let events_json = client.get(&url)
             .basic_auth(crate::ZULIP_USER, Some(crate::ZULIP_TOKEN))
             .send().await.unwrap()
             .text().await.unwrap();
-        let events: ZulipEvents = serde_json::from_str(&events).unwrap_or_else(|e| {
-            panic!("{:?}: {}", e, events)
+        if events_json.contains("BAD_EVENT_QUEUE_ID") {
+            // Event queue is garbage collected
+            queue_id = register_event_queue(&client).await.unwrap();
+            continue;
+        }
+        let events: ZulipEvents = serde_json::from_str(&events_json).unwrap_or_else(|e| {
+            panic!("{:?}: {}", e, events_json)
         });
         for event in events.events {
             match event {
+                ZulipEvent::Heartbeat { id } => last_event_id = id as i64,
                 ZulipEvent::Message { id, message } => {
                     println!("{:?}", message);
                     let _ = crate::parse_comment("zulip", message.sender_id, message.id, &message.content).await;
                     last_event_id = id as i64;
                 }
-                _ => {}
+                ZulipEvent::Presence { id } => last_event_id = id as i64,
+                ZulipEvent::Typing { id } => last_event_id = id as i64,
+                ZulipEvent::UpdateMessageFlags { id } => last_event_id = id as i64,
+                ZulipEvent::Other => {
+                    println!("{:?}", events_json)
+                }
             }
         }
         tokio::time::delay_for(std::time::Duration::from_secs(1)).await;
@@ -55,10 +70,26 @@ struct ZulipEvents {
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "type")]
 enum ZulipEvent {
+    #[serde(rename = "heartbeat")]
+    Heartbeat {
+        id: u64,
+    },
     #[serde(rename = "message")]
     Message {
         id: u64,
         message: ZulipMessage,
+    },
+    #[serde(rename = "presence")]
+    Presence {
+        id: u64,
+    },
+    #[serde(rename = "typing")]
+    Typing {
+        id: u64,
+    },
+    #[serde(rename = "update_message_flags")]
+    UpdateMessageFlags {
+        id: u64,
     },
     #[serde(other)]
     Other,
@@ -70,4 +101,6 @@ struct ZulipMessage {
     content: String,
     sender_full_name: String,
     sender_id: u64,
+    #[serde(rename = "type")]
+    type_: String, // private or stream
 }
