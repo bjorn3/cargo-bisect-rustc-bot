@@ -70,7 +70,7 @@ async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<dyn std::err
         (Some(comment), Some(issue), None, Some("created")) => {
             if let (Some(issue_number), Some(comment_id), Some(comment_body)) = (issue.get("number").and_then(|id| id.as_u64()), comment.get("id").and_then(|id| id.as_u64()), comment.get("body").and_then(|body| body.as_str())) {
                 println!("{:?} commented \"{}\"", sender, comment_body);
-                parse_comment(repo, issue_number, comment_id, comment_body).await?;
+                parse_comment(&ReplyTo::Github { repo, issue_number }, comment_id, comment_body).await?;
             } else {
                 println!("no comment body: {:#?}", json);
             }
@@ -281,7 +281,7 @@ impl Command {
     }
 }
 
-async fn parse_comment(repo: &str, issue_number: u64, comment_id: u64, comment: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn parse_comment(reply_to: &ReplyTo, comment_id: u64, comment: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match Command::parse_comment(comment)? {
         Some(Command::Bisect {
             start,
@@ -294,11 +294,6 @@ async fn parse_comment(repo: &str, issue_number: u64, comment_id: u64, comment: 
             }
             cmds.push(format!("--end={}", end));
             println!("{:?}", &cmds);
-            let reply_to = if repo == "zulip" {
-                ReplyTo::ZulipPrivate { user_id: issue_number }
-            } else {
-                ReplyTo::Github { repo: repo.to_string(), issue_number }
-            };
             push_job(&reply_to, comment_id, &cmds, &code);
             reply_to.comment("started bisection").await?;
         }

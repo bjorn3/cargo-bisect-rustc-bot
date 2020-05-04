@@ -35,7 +35,7 @@ pub(crate) async fn zulip_task() {
                 ZulipEvent::Heartbeat { id } => last_event_id = id as i64,
                 ZulipEvent::Message { id, message } => {
                     println!("{:?}", message);
-                    let _ = crate::parse_comment("zulip", message.sender_id, message.id, &message.content).await;
+                    let _ = crate::parse_comment(&crate::ReplyTo::ZulipPrivate { user_id: message.sender_id }, message.id, &message.content).await;
                     last_event_id = id as i64;
                 }
                 ZulipEvent::Presence { id } => last_event_id = id as i64,
