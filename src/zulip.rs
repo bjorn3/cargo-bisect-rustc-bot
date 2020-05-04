@@ -1,7 +1,7 @@
 async fn register_event_queue(client: &reqwest::Client) -> reqwest::Result<String> {
     let res = client
         .post("https://rust-lang.zulipchat.com/api/v1/register?event_types=%5B%22message%22%5D&all_public_streams=true")
-        .basic_auth(crate::ZULIP_USER, Some(crate::ZULIP_TOKEN))
+        .basic_auth(&*crate::ZULIP_USER, Some(&*crate::ZULIP_TOKEN))
         .body("event_types=%5B%22message%22%5D&all_public_streams=true")
         .send().await?;
     let res = match res.error_for_status_ref() {
@@ -25,7 +25,7 @@ pub(crate) async fn zulip_task() {
         let url = format!("https://rust-lang.zulipchat.com/api/v1/events?queue_id={}&last_event_id={}&dont_block=false", queue_id.replace(':', "%3A"), last_event_id);
         println!("GET {}", url);
         let events_json = client.get(&url)
-            .basic_auth(crate::ZULIP_USER, Some(crate::ZULIP_TOKEN))
+            .basic_auth(&*crate::ZULIP_USER, Some(&*crate::ZULIP_TOKEN))
             .send().await.unwrap()
             .text().await.unwrap();
         if events_json.contains("BAD_EVENT_QUEUE_ID") {
@@ -82,7 +82,7 @@ pub(crate) async fn zulip_post_public_message(stream_id: u64, subject: &str, bod
             percent_encoding::utf8_percent_encode(subject, percent_encoding::NON_ALPHANUMERIC),
             percent_encoding::utf8_percent_encode(body, percent_encoding::NON_ALPHANUMERIC),
         ))
-        .basic_auth(crate::ZULIP_USER, Some(crate::ZULIP_TOKEN))
+        .basic_auth(&*crate::ZULIP_USER, Some(&*crate::ZULIP_TOKEN))
         .send().await?
         .text().await?;
     println!("post message result: {}", res);
@@ -97,7 +97,7 @@ pub(crate) async fn zulip_post_private_message(user_id: u64, body: &str) -> Resu
             user_id,
             percent_encoding::utf8_percent_encode(body, percent_encoding::NON_ALPHANUMERIC),
         ))
-        .basic_auth(crate::ZULIP_USER, Some(crate::ZULIP_TOKEN))
+        .basic_auth(&*crate::ZULIP_USER, Some(&*crate::ZULIP_TOKEN))
         .send().await?
         .text().await?;
     println!("post message result: {}", res);

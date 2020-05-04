@@ -125,7 +125,7 @@ async fn gh_api(url: &str) -> reqwest::Result<String> {
         .get(url)
         .header(hyper::http::header::USER_AGENT, hyper::http::HeaderValue::from_str(crate::USER_AGENT).unwrap())
         .header(hyper::http::header::ACCEPT, hyper::http::HeaderValue::from_str("application/vnd.github.antiope-preview+json").unwrap())
-        .basic_auth(crate::GITHUB_USERNAME, Some(crate::GITHUB_TOKEN))
+        .basic_auth(&*crate::GITHUB_USERNAME, Some(&*crate::GITHUB_TOKEN))
         .send()
         .await?;
     println!("GET {}: {}", url, res.status());
@@ -145,7 +145,7 @@ pub(crate) async fn gh_api_post(url: &str, body: String) -> reqwest::Result<Stri
         .header(hyper::http::header::USER_AGENT, hyper::http::HeaderValue::from_str(crate::USER_AGENT).unwrap())
         .header(hyper::http::header::ACCEPT, hyper::http::HeaderValue::from_str("application/vnd.github.v3.html+json").unwrap())
         .header(hyper::http::header::CONTENT_TYPE, hyper::http::HeaderValue::from_str("text/json").unwrap())
-        .basic_auth(crate::GITHUB_USERNAME, Some(crate::GITHUB_TOKEN))
+        .basic_auth(&*crate::GITHUB_USERNAME, Some(&*crate::GITHUB_TOKEN))
         .body(body)
         .send()
         .await?;

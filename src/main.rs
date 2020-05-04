@@ -9,10 +9,12 @@ const BOT_NAME: &'static str = "bisect-bot ";
 const USER_AGENT: &'static str = "https://github.com/bjorn3/cargo-bisect-rustc-bot";
 const REPO_WHITELIST: &'static [&'static str] = &["bjorn3/cargo-bisect-rustc-bot", JOB_REPO];
 const JOB_REPO: &'static str = "bjorn3/cargo-bisect-rustc-bot-jobs";
-const GITHUB_USERNAME: &'static str = env!("GITHUB_USERNAME", "github username not defined");
-const GITHUB_TOKEN: &'static str = env!("GITHUB_TOKEN", "github personal access token not defined");
-const ZULIP_USER: &'static str = env!("ZULIP_USERNAME", "zulip username not defined");
-const ZULIP_TOKEN: &'static str = env!("ZULIP_TOKEN", "zulip api token not defined");
+lazy_static::lazy_static! {
+    static ref GITHUB_USERNAME: String = std::env::var("GITHUB_USERNAME").expect("github username not defined");
+    static ref GITHUB_TOKEN: String = std::env::var("GITHUB_TOKEN").expect("github personal access token not defined");
+    static ref ZULIP_USER: String = std::env::var("ZULIP_USERNAME").expect("zulip username not defined");
+    static ref ZULIP_TOKEN: String = std::env::var("ZULIP_TOKEN").expect("zulip api token not defined");
+}
 
 #[tokio::main]
 async fn main() {
