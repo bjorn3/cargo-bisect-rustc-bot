@@ -34,7 +34,8 @@ pub(crate) async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<d
                 println!("no comment body: {:#?}", json);
             }
         }
-        (None, None, Some(check_run), Some("completed")) => {
+        (None, None, Some(check_run), Some(action)) => {
+            println!("action: {}", action);
             let reply_to = if let Some(head_sha) = check_run.get("head_sha").and_then(|sha| sha.as_str()) {
                 let res = gh_api(&format!("https://api.github.com/repos/bjorn3/cargo-bisect-rustc-bot-jobs/git/commits/{}", head_sha)).await?;
                 println!("{}", res);
@@ -47,8 +48,19 @@ pub(crate) async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<d
             };
             println!("reply to: {:?}", reply_to);
             if let Some(html_url) = check_run.get("html_url").and_then(|url| url.as_str()) {
-                let body = format!("bisect result: {}", html_url);
-                reply_to.comment(&body).await?;
+                match action {
+                    "created" => {
+                        let run_id = check_run["id"].as_u64().unwrap();
+                        reply_to.comment(&format!(
+                            "bisect started: {}\n\nUse `{}cancel {}` to cancel the bisection.",
+                            html_url, crate::BOT_NAME, run_id,
+                        )).await?;
+                    }
+                    "completed" => {
+                        reply_to.comment(&format!("bisect result: {}", html_url)).await?;
+                    }
+                    _ => {}
+                }
             } else {
                 println!("no check run id: {:#?}", json);
             }
@@ -60,7 +72,7 @@ pub(crate) async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<d
     Ok(Response::new("processed".into()))
 }
 
-async fn gh_api(url: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+async fn gh_api(url: &str) -> reqwest::Result<String> {
     println!("GET {}", url);
     let res = reqwest::Client::new()
         .get(url)
@@ -73,7 +85,7 @@ async fn gh_api(url: &str) -> Result<String, Box<dyn std::error::Error + Send + 
     Ok(res.text().await?)
 }
 
-async fn gh_api_post(url: &str, body: String) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) async fn gh_api_post(url: &str, body: String) -> reqwest::Result<String> {
     println!("POST {} <- {}", url, body);
     let res = reqwest::Client::new()
         .post(url)
@@ -88,7 +100,7 @@ async fn gh_api_post(url: &str, body: String) -> Result<String, Box<dyn std::err
     Ok(res.text().await?)
 }
 
-pub(crate) async fn gh_post_comment(repo: &str, issue_number: u64, body: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) async fn gh_post_comment(repo: &str, issue_number: u64, body: &str) -> reqwest::Result<()> {
     println!("on issue {} post comment {:?}", issue_number, body);
     let res = gh_api_post(
         &format!("https://api.github.com/repos/{}/issues/{}/comments", repo, issue_number),

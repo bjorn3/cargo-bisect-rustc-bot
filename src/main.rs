@@ -58,7 +58,8 @@ impl ReplyTo {
     async fn comment(&self, body: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match *self {
             ReplyTo::Github { ref repo, issue_number } => {
-                crate::github::gh_post_comment(repo, issue_number, body).await
+                crate::github::gh_post_comment(repo, issue_number, body).await?;
+                Ok(())
             }
             ReplyTo::ZulipPrivate { user_id } => {
                 crate::zulip::zulip_post_message(user_id, body).await
@@ -198,8 +199,7 @@ async fn parse_comment(reply_to: &ReplyTo, comment_id: u64, comment: &str) -> Re
             }
             cmds.push(format!("--end={}", end));
             println!("{:?}", &cmds);
-            push_job(&reply_to, comment_id, &cmds, &code);
-            reply_to.comment("started bisection").await?;
+            push_job(&reply_to, comment_id, &cmds, &code).await?;
         }
         None => {}
     }
@@ -207,49 +207,19 @@ async fn parse_comment(reply_to: &ReplyTo, comment_id: u64, comment: &str) -> Re
     Ok(())
 }
 
-macro_rules! cmd {
-    ($cmd:ident $($arg:tt)*) => {
-        #[allow(unused_parens)]
-        let res = std::process::Command::new(stringify!($cmd))
-            .current_dir("push-job")
-            $(.arg($arg))*
-            .spawn()
-            .unwrap()
-            .wait()
-            .unwrap();
-        assert!(res.success());
-    };
-}
-
-fn push_job(reply_to: &ReplyTo, job_id: u64, bisect_cmds: &[String], repro: &str) {
+async fn push_job(reply_to: &ReplyTo, job_id: u64, bisect_cmds: &[String], repro: &str) -> reqwest::Result<()> {
     // Escape commands and join with whitespace
     let bisect_cmds = bisect_cmds.iter().map(|cmd| format!("{:?}", cmd)).collect::<Vec<_>>().join(" ");
 
-    let _ = std::process::Command::new("git")
-            .current_dir("push-job")
-            .arg("branch")
-            .arg("-d")
-            .arg("--force")
-            .arg(format!("job{}", job_id))
-            .spawn()
-            .unwrap()
-            .wait()
-            .unwrap();
-    cmd!(git "checkout" "--orphan" (format!("job{}", job_id)));
-    std::fs::write("push-job/Cargo.toml", r#"[package]
-name = "cargo-bisect-bot-job"
-version = "0.0.0"
-edition = "2018"
-publish = false
+    let src_lib = create_blob(repro).await?;
+    let src = create_tree(&[TreeEntry {
+        path: "lib.rs".to_string(),
+        mode: TreeEntryMode::File,
+        type_: TreeEntryType::Blob,
+        sha: src_lib,
+    }]).await?;
 
-[dependencies]
-"#).unwrap();
-    std::fs::remove_dir_all("push-job/src").unwrap();
-    std::fs::create_dir("push-job/src").unwrap();
-    std::fs::write("push-job/src/lib.rs", repro).unwrap();
-    std::fs::remove_dir_all("push-job/.github").unwrap();
-    std::fs::create_dir_all("push-job/.github/workflows").unwrap();
-    std::fs::write("push-job/.github/workflows/bisect.yaml", format!(
+    let github_workflow_bisect = create_blob(&format!(
         r#"
 name: Bisect
 
@@ -280,8 +250,129 @@ jobs:
       run: cargo bisect-rustc {} --access=github | grep -v "for x86_64-unknown-linux-gnu" || true
         "#,
         bisect_cmds,
-    )).unwrap();
-    cmd!(git "add" ".");
-    cmd!(git "commit" "-m" (format!("Bisect job for comment id {}\n\n{}", job_id, reply_to.to_commit_header())));
-    cmd!(git "push" "origin" (format!("job{}", job_id)) "--force");
+    )).await?;
+    let github_workflow = create_tree(&[TreeEntry {
+        path: "bisect.yaml".to_string(),
+        mode: TreeEntryMode::File,
+        type_: TreeEntryType::Blob,
+        sha: github_workflow_bisect,
+    }]).await?;
+    let github = create_tree(&[TreeEntry {
+        path: "workflows".to_string(),
+        mode: TreeEntryMode::Subdirectory,
+        type_: TreeEntryType::Tree,
+        sha: github_workflow,
+    }]).await?;
+
+    let cargo = create_blob(r#"[package]
+name = "cargo-bisect-bot-job"
+version = "0.0.0"
+edition = "2018"
+publish = false
+
+[dependencies]
+    "#).await?;
+
+    let root = create_tree(&[
+        TreeEntry {
+            path: "src".to_string(),
+            mode: TreeEntryMode::Subdirectory,
+            type_: TreeEntryType::Tree,
+            sha: src,
+        },
+        TreeEntry {
+            path: ".github".to_string(),
+            mode: TreeEntryMode::Subdirectory,
+            type_: TreeEntryType::Tree,
+            sha: github,
+        },
+        TreeEntry {
+            path: "Cargo.toml".to_string(),
+            mode: TreeEntryMode::File,
+            type_: TreeEntryType::Blob,
+            sha: cargo,
+        }
+    ]).await?;
+
+    let commit = create_commit(
+        &format!("Bisect job for comment id {}\n\n{}", job_id, reply_to.to_commit_header()),
+        &root,
+        &[],
+    ).await?;
+
+    push_branch(&format!("job{}", job_id), &commit).await?;
+
+    Ok(())
+}
+
+async fn create_blob(content: &str) -> reqwest::Result<String> {
+    let res = crate::github::gh_api_post("https://api.github.com/repos/bjorn3/cargo-bisect-rustc-bot-jobs/git/blobs", serde_json::to_string(&serde_json::json!({
+        "content": content,
+        "encoding": "utf-8",
+    })).unwrap()).await?;
+    println!("create blob: {}", res);
+    let res: serde_json::Value = serde_json::from_str(&res).unwrap();
+    Ok(res["sha"].as_str().unwrap().to_string())
+}
+
+async fn create_tree(content: &[TreeEntry]) -> reqwest::Result<String> {
+    let res = crate::github::gh_api_post("https://api.github.com/repos/bjorn3/cargo-bisect-rustc-bot-jobs/git/trees", serde_json::to_string(&serde_json::json!({
+        "tree": content,
+    })).unwrap()).await?;
+    println!("create tree: {}", res);
+    let res: serde_json::Value = serde_json::from_str(&res).unwrap();
+    Ok(res["sha"].as_str().unwrap().to_string())
+}
+
+#[derive(serde::Serialize)]
+struct TreeEntry {
+    path: String,
+    mode: TreeEntryMode,
+    #[serde(rename = "type")]
+    type_: TreeEntryType,
+    sha: String,
+}
+
+#[derive(serde::Serialize)]
+enum TreeEntryMode {
+    #[serde(rename = "100644")]
+    File,
+    #[serde(rename = "100755")]
+    Executable,
+    #[serde(rename = "040000")]
+    Subdirectory,
+    #[serde(rename = "160000")]
+    Submodule,
+    #[serde(rename = "120000")]
+    Symlink,
+}
+
+#[derive(serde::Serialize)]
+enum TreeEntryType {
+    #[serde(rename = "blob")]
+    Blob,
+    #[serde(rename = "tree")]
+    Tree,
+    #[serde(rename = "commit")]
+    Commit,
+}
+
+async fn create_commit(message: &str, tree: &str, parents: &[&str]) -> reqwest::Result<String> {
+    let res = crate::github::gh_api_post("https://api.github.com/repos/bjorn3/cargo-bisect-rustc-bot-jobs/git/commits", serde_json::to_string(&serde_json::json!({
+        "message": message,
+        "tree": tree,
+        "parents": parents,
+    })).unwrap()).await?;
+    println!("create commit: {}", res);
+    let res: serde_json::Value = serde_json::from_str(&res).unwrap();
+    Ok(res["sha"].as_str().unwrap().to_string())
+}
+
+async fn push_branch(branch: &str, commit: &str) -> reqwest::Result<()> {
+    let res = crate::github::gh_api_post("https://api.github.com/repos/bjorn3/cargo-bisect-rustc-bot-jobs/git/refs", serde_json::to_string(&serde_json::json!({
+        "ref": format!("refs/heads/{}", branch),
+        "sha": commit,
+    })).unwrap()).await?;
+    println!("push branch: {}", res);
+    Ok(())
 }
