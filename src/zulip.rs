@@ -41,6 +41,8 @@ pub(crate) async fn zulip_task() {
                 ZulipEvent::Presence { id } => last_event_id = id as i64,
                 ZulipEvent::Typing { id } => last_event_id = id as i64,
                 ZulipEvent::UpdateMessageFlags { id } => last_event_id = id as i64,
+                ZulipEvent::RealUser { id } => last_event_id = id as i64,
+                ZulipEvent::Subscription { id } => last_event_id = id as i64,
                 ZulipEvent::Other => {
                     println!("{:?}", events_json)
                 }
@@ -50,10 +52,10 @@ pub(crate) async fn zulip_task() {
     }
 }
 
-pub(crate) async fn zulip_post_message(user: u64, body: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) async fn zulip_post_message(user_id: u64, body: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::new();
     let res = client
-        .post(&format!("https://rust-lang.zulipchat.com/api/v1/messages?type=private&to=%5B{}%5D&content={}", user, percent_encoding::utf8_percent_encode(body, percent_encoding::NON_ALPHANUMERIC)))
+        .post(&format!("https://rust-lang.zulipchat.com/api/v1/messages?type=private&to=%5B{}%5D&content={}", user_id, percent_encoding::utf8_percent_encode(body, percent_encoding::NON_ALPHANUMERIC)))
         .basic_auth(crate::ZULIP_USER, Some(crate::ZULIP_TOKEN))
         .send().await?
         .text().await?;
@@ -89,6 +91,14 @@ enum ZulipEvent {
     },
     #[serde(rename = "update_message_flags")]
     UpdateMessageFlags {
+        id: u64,
+    },
+    #[serde(rename = "realm_user")]
+    RealUser {
+        id: u64,
+    },
+    #[serde(rename = "subscription")]
+    Subscription {
         id: u64,
     },
     #[serde(other)]
