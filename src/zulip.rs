@@ -38,11 +38,13 @@ pub(crate) async fn zulip_task() {
                     let _ = crate::parse_comment(&crate::ReplyTo::ZulipPrivate { user_id: message.sender_id }, message.id, &message.content).await;
                     last_event_id = id as i64;
                 }
+                ZulipEvent::Pointer { id } => last_event_id = id as i64,
                 ZulipEvent::Presence { id } => last_event_id = id as i64,
                 ZulipEvent::Typing { id } => last_event_id = id as i64,
                 ZulipEvent::UpdateMessageFlags { id } => last_event_id = id as i64,
                 ZulipEvent::RealUser { id } => last_event_id = id as i64,
                 ZulipEvent::Subscription { id } => last_event_id = id as i64,
+                ZulipEvent::UpdateMessage { id } => last_event_id = id as i64,
                 ZulipEvent::Other => {
                     println!("{:?}", events_json)
                 }
@@ -81,6 +83,10 @@ enum ZulipEvent {
         id: u64,
         message: ZulipMessage,
     },
+    #[serde(rename = "pointer")]
+    Pointer {
+        id: u64,
+    },
     #[serde(rename = "presence")]
     Presence {
         id: u64,
@@ -99,6 +105,10 @@ enum ZulipEvent {
     },
     #[serde(rename = "subscription")]
     Subscription {
+        id: u64,
+    },
+    #[serde(rename = "update_message")]
+    UpdateMessage {
         id: u64,
     },
     #[serde(other)]
