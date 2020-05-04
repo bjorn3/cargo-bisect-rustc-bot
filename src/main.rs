@@ -177,7 +177,6 @@ impl Command {
                         end,
                         code,
                     }));
-
                 }
                 cmd => {
                     return Err(format!("unknown command {:?}", cmd));
@@ -189,7 +188,7 @@ impl Command {
     }
 }
 
-async fn parse_comment(reply_to: &ReplyTo, comment_id: u64, comment: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn parse_comment(reply_to: &ReplyTo, comment_id: &str, comment: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match Command::parse_comment(comment)? {
         Some(Command::Bisect {
             start,
@@ -210,7 +209,7 @@ async fn parse_comment(reply_to: &ReplyTo, comment_id: u64, comment: &str) -> Re
     Ok(())
 }
 
-async fn push_job(reply_to: &ReplyTo, job_id: u64, bisect_cmds: &[String], repro: &str) -> reqwest::Result<()> {
+async fn push_job(reply_to: &ReplyTo, job_id: &str, bisect_cmds: &[String], repro: &str) -> reqwest::Result<()> {
     // Escape commands and join with whitespace
     let bisect_cmds = bisect_cmds.iter().map(|cmd| format!("{:?}", cmd)).collect::<Vec<_>>().join(" ");
 
@@ -303,7 +302,7 @@ publish = false
         &[],
     ).await?;
 
-    push_branch(&format!("job{}", job_id), &commit).await?;
+    push_branch(&format!("job-{}", job_id), &commit).await?;
 
     Ok(())
 }

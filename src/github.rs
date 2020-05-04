@@ -27,7 +27,7 @@ pub(crate) async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<d
             println!("{:?} commented \"{}\"", event.sender.login, event.comment.body);
             crate::parse_comment(
                 &crate::ReplyTo::Github { repo: event.repository.full_name.clone(), issue_number: event.issue.number },
-                event.comment.id,
+                &format!("gh{}", event.comment.id),
                 &event.comment.body,
             ).await?;
         }
@@ -46,12 +46,15 @@ pub(crate) async fn web_hook(req: Request<Body>) -> Result<Response<Body>, Box<d
             match &*event.action {
                 "created" => {
                     reply_to.comment(&format!(
-                        "bisect started: {}\n\nUse `{}cancel {}` to cancel the bisection.",
-                        event.check_run.html_url, crate::BOT_NAME, event.check_run.id,
+                        "bisection job {} started: {}",
+                        event.check_run.id, event.check_run.html_url,
                     )).await?;
                 }
                 "completed" => {
-                    reply_to.comment(&format!("bisect result: {}", event.check_run.html_url)).await?;
+                    reply_to.comment(&format!(
+                        "bisection job {} completed: {}",
+                        event.check_run.id, event.check_run.html_url,
+                    )).await?;
                 }
                 _ => {
                     println!("unknown check_run action");
@@ -158,7 +161,7 @@ pub(crate) async fn gh_api_post(url: &str, body: String) -> reqwest::Result<Stri
 
 pub(crate) async fn gh_post_comment(repo: &str, issue_number: u64, body: &str) -> reqwest::Result<()> {
     println!("on issue {} post comment {:?}", issue_number, body);
-    let res = gh_api_post(
+    let _res = gh_api_post(
         &format!("https://api.github.com/repos/{}/issues/{}/comments", repo, issue_number),
         format!(r#"{{"body": {:?}}}"#, body),
     ).await?;
