@@ -46,11 +46,15 @@ async fn request_handler(req: Request<Body>) -> Result<Response<Body>, Box<dyn s
     })
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum ReplyTo {
     Github {
         repo: String,
         issue_number: u64,
+    },
+    ZulipPublic {
+        stream_id: u64,
+        subject: String,
     },
     ZulipPrivate {
         user_id: u64,
@@ -64,8 +68,11 @@ impl ReplyTo {
                 crate::github::gh_post_comment(repo, issue_number, body).await?;
                 Ok(())
             }
+            ReplyTo::ZulipPublic { stream_id, ref subject } => {
+                crate::zulip::zulip_post_public_message(stream_id, subject, body).await
+            }
             ReplyTo::ZulipPrivate { user_id } => {
-                crate::zulip::zulip_post_message(user_id, body).await
+                crate::zulip::zulip_post_private_message(user_id, body).await
             }
         }
     }
@@ -76,6 +83,9 @@ impl ReplyTo {
         match *self {
             ReplyTo::Github { ref repo, issue_number } => {
                 format!("{}: github {}#{}", Self::COMMIT_HEADER, repo, issue_number)
+            }
+            ReplyTo::ZulipPublic { stream_id, ref subject } => {
+                format!("{}: zulip-public {} | {}", Self::COMMIT_HEADER, stream_id, subject)
             }
             ReplyTo::ZulipPrivate { user_id } => {
                 format!("{}: zulip-private {}", Self::COMMIT_HEADER, user_id)
@@ -93,11 +103,11 @@ impl ReplyTo {
             let mut split = header.split(" ");
             let kind = split.next().ok_or(())?.trim();
             let to = split.next().ok_or(())?.trim();
-            if split.next().is_some() {
-                return Err(());
-            }
             match kind {
                 "github" => {
+                    if split.next().is_some() {
+                        return Err(());
+                    }
                     let mut split = to.split("#");
                     let repo = split.next().ok_or(())?.trim();
                     let issue_number = split.next().ok_or(())?.trim().parse().map_err(|_| ())?;
@@ -109,7 +119,18 @@ impl ReplyTo {
                         issue_number,
                     });
                 }
+                "zulip-public" => {
+                    let stream_id: u64 = to.parse().map_err(|_| ())?;
+                    let subject = header[header.find("|").ok_or(())?+2..].to_string();
+                    return Ok(ReplyTo::ZulipPublic {
+                        stream_id,
+                        subject,
+                    })
+                }
                 "zulip-private" => {
+                    if split.next().is_some() {
+                        return Err(());
+                    }
                     let user_id = to.parse().map_err(|_| ())?;
                     return Ok(ReplyTo::ZulipPrivate {
                         user_id,
@@ -121,6 +142,22 @@ impl ReplyTo {
 
         Err(())
     }
+}
+
+#[test]
+fn test_reply_to_parsing() {
+    assert_eq!(
+        ReplyTo::from_commit_message("X-Bisectbot-Reply-To: github a/b#5"),
+        Ok(ReplyTo::Github { repo: "a/b".to_string(), issue_number: 5}),
+    );
+    assert_eq!(
+        ReplyTo::from_commit_message("X-Bisectbot-Reply-To: zulip-public 123 | this is the #1 topic on this zulip instance!"),
+        Ok(ReplyTo::ZulipPublic { stream_id: 123, subject: "this is the #1 topic on this zulip instance!".to_string() }),
+    );
+    assert_eq!(
+        ReplyTo::from_commit_message("X-Bisectbot-Reply-To: zulip-private 123"),
+        Ok(ReplyTo::ZulipPrivate { user_id: 123 }),
+    );
 }
 
 enum Command {
